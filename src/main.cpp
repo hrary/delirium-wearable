@@ -15,16 +15,7 @@ const char *deviceId = "aaaaaa";
 MAX30105 particleSensor;
 Adafruit_MPU6050 mpu;
 
-float sumAccX{0};
-float sumAccY{0};
-float sumAccZ{0};
-float meanAccX{0};
-float meanAccY{0};
-float meanAccZ{0};
-int numMeanElements{1};
-
 sensors_event_t a, g, temp;
-
 
 bool sensorReady = false;
 
@@ -54,6 +45,7 @@ struct HeartRateData
   int averageDeltaHR = 0;
   int beatCount = 0;
   int bpm = 0;
+  int btb = 0;
   HeartRateData() {}
 };
 
@@ -65,14 +57,28 @@ struct MovementData
   float sumGyroX;
   float sumGyroY;
   float sumGyroZ;
+
+  float sumAccMagnitude;
+  float sumGyroMagnitude;
+
   int numElements = 0;
   MovementData() {}
 };
 
 HeartRateData hrData = {};
+MovementData mvData = {};
 Timer twoSecondTimer(2000);
+Timer movementTimer(10);
 
 String payload = "";
+
+struct MovementPacket {
+  float acc;
+  float gyro;
+};
+
+MovementPacket movementPackets[250];
+float temperature = 0;
 
 void initWifi()
 {
@@ -246,12 +252,41 @@ void sendPOSTRequest(const String &payload)
   }
 }
 
-void createPayload(String &payload, String deviceId, int hr, int o2, int skinTemp, int accX, int accY, int accZ, int gyroX, int gyroY, int gyroZ)
+void createPayload(String &payload, String deviceId, int HR, int BTB, int SpO2, int Temp, float acc_mean, 
+                  float acc_std, float acc_max, int acc_peaks, int gyro_mean, int gyro_std, int gyro_peaks,
+                   float accX, float accY, float accZ, float gyroX, float gyroY, float gyroZ)
 {
   String timestamp = getUTCTimestamp();
-  payload = "{\"deviceId\": \"" + deviceId + "\", \"timestamp\": \"" + timestamp + "\", \"heartRate\": " + hr + ", \"o2Sat\": " + String(o2 + random(-2, 3)) + ", \"skinTemp\": " + String(skinTemp + random(0, 2)) +
-            ", \"accX\": " + accX + ", \"accY\": " + accY + ", \"accZ\": " + accZ +
-            ", \"gyroX\": " + gyroX + ", \"gyroY\": " + gyroY + ", \"gyroZ\": " + gyroZ + "}";
+  payload = 
+  "{\"deviceId\": \"" + deviceId + "\", \"timestamp\": \"" + timestamp + "\", \"HR\": " + HR + 
+  ", \"BTB\": " + BTB + ", \"SpO2\": " + SpO2 + ", \"Temp\": " + Temp + ", \"accel_mean_dyn_2s\": " + 
+  acc_mean + ", \"accel_std_dyn_2s\": " + acc_std + ", \"accel_max_2s\": " + acc_max + ", \"accel_peak_count_2s\": " 
+  + acc_peaks + ", \"gyro_mean_2s\": " + gyro_mean + ", \"gyro_std_2s\": " + gyro_std + 
+  ", \"gyro_large_change_count_2s\": " + gyro_peaks + ", \"accX\": " + accX + ", \"accY\": " + accY + 
+  ", \"accZ\": " + accZ + ", \"gyroX\": " + gyroX + ", \"gyroY\": " + gyroY + ", \"gyroZ\": " + gyroZ + "}";
+}
+
+float getMagnitude(float x, float y, float z)
+{
+  return sqrt(x * x + y * y + z * z);
+}
+
+float stdDev(MovementPacket data[], int size, float mean, bool isMovement)
+{
+  float sum = 0.0;
+  if (!isMovement)
+  {
+    for (int i = 0; i < size; i++)
+    {
+      sum += (data[i].gyro - mean) * (data[i].gyro - mean);
+    }
+    return sqrt(sum / (size-1));
+  }
+  for (int i = 0; i < size; i++)
+  {
+    sum += (data[i].acc - mean) * (data[i].acc - mean);
+  }
+  return sqrt(sum / (size-1));
 }
 
 void loop()
@@ -265,32 +300,55 @@ void loop()
     hrData.totalDeltaHR += delta;
     hrData.averageDeltaHR = hrData.totalDeltaHR / hrData.beatCount;
     hrData.lastHeartBeat = millis();
-    hrData.bpm = 60000 / delta;
+    hrData.bpm = 60000/hrData.averageDeltaHR;
+    hrData.btb = 60000/delta;
     Serial.println("Beat detected! Average Delta HR: " + String(hrData.averageDeltaHR));
   }
 
-  mpu.getEvent(&a, &g, &temp); // check if this works - only if MPU has correct address
+  if (movementTimer.isExpired()) {
+    mpu.getEvent(&a, &g, &temp); // check if this works - only if MPU has correct address
 
-  sumAccX += sqrt(a.acceleration.x * a.acceleration.x);
-  sumAccY += sqrt(a.acceleration.y * a.acceleration.y);
-  sumAccZ += sqrt(a.acceleration.z * a.acceleration.z);
-  meanAccX = sumAccX / numMeanElements;
-  meanAccY = sumAccY / numMeanElements;
-  meanAccZ = sumAccZ / numMeanElements;
-  numMeanElements += 1;
+    mvData.sumAccX += sqrt(a.acceleration.x * a.acceleration.x);
+    mvData.sumAccY += sqrt(a.acceleration.y * a.acceleration.y);
+    mvData.sumAccZ += sqrt(a.acceleration.z * a.acceleration.z);
+    mvData.sumGyroX += sqrt(g.gyro.x * g.gyro.x);
+    mvData.sumGyroY += sqrt(g.gyro.y * g.gyro.y);
+    mvData.sumGyroZ += sqrt(g.gyro.z * g.gyro.z);
+    movementPackets[mvData.numElements - 1] = {
+      getMagnitude(a.acceleration.x, a.acceleration.y, a.acceleration.z), 
+      getMagnitude(g.gyro.x, g.gyro.y, g.gyro.z)
+    };
+
+    mvData.sumAccMagnitude += getMagnitude(a.acceleration.x, a.acceleration.y, a.acceleration.z);
+    mvData.sumGyroMagnitude += getMagnitude(g.gyro.x, g.gyro.y, g.gyro.z);
+
+    mvData.numElements += 1; 
+    temperature = temp.temperature;     
+  }
+
 
   if (twoSecondTimer.isExpired())
   {
-    Serial.println(sensorReady);
-    createPayload(payload, deviceId, hrData.bpm, 95, 36, meanAccX, meanAccY, meanAccZ, g.gyro.x, g.gyro.y, g.gyro.z);
+    // FOR DISPLAY ONLY
+    float meanAccX = mvData.sumAccX / mvData.numElements;
+    float meanAccY = mvData.sumAccY / mvData.numElements;
+    float meanAccZ = mvData.sumAccZ / mvData.numElements;
+    float meanGyroX = mvData.sumGyroX / mvData.numElements;
+    float meanGyroY = mvData.sumGyroY / mvData.numElements;
+    float meanGyroZ = mvData.sumGyroZ / mvData.numElements;
+
+    float meanAccMagnitude = mvData.sumAccMagnitude / mvData.numElements;
+    float meanGyroMagnitude = mvData.sumGyroMagnitude / mvData.numElements;
+
+    float stdDevAcc = stdDev(movementPackets, mvData.numElements - 1, meanAccMagnitude, true);
+    float stdDevGyro = stdDev(movementPackets, mvData.numElements - 1, meanGyroMagnitude, false);
+
+    createPayload(
+      payload, deviceId, hrData.bpm, hrData.btb, 99, temperature, 
+      meanAccMagnitude, stdDevAcc, 5, 5, meanGyroMagnitude, 
+      stdDevGyro, 5, meanAccX, meanAccY, meanAccZ, meanGyroX, meanGyroY, meanGyroZ);
     sendPOSTRequest(payload);
-    hrData = {};
-    numMeanElements = 1;
-    sumAccX = 0;
-    sumAccY = 0;
-    sumAccZ = 0;
-    meanAccX = 0;
-    meanAccY = 0;
-    meanAccZ = 0;
+    mvData = MovementData();
+    hrData = HeartRateData();
   }
 }
