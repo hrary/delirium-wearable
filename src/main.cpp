@@ -46,7 +46,7 @@ struct Timer
 
 struct HeartRateData
 {
-  int lastHeartBeat = millis();
+  unsigned long lastHeartBeat = millis();
   int totalDeltaHR = 0;
   int averageDeltaHR = 0;
   int beatCount = 0;
@@ -430,6 +430,6 @@ void loop()
     mvData = MovementData();
     hrData = HeartRateData();
     bufferIndex = 0;
-    
+
   }
 }
