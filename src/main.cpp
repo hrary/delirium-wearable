@@ -15,6 +15,12 @@ const char *deviceId = "aaaaaa";
 MAX30105 particleSensor;
 Adafruit_MPU6050 mpu;
 
+//Create infared sensor LED data:
+const int buffer_length = 50;
+uint32_t ir_Buffer[buffer_length]; //infrared LED sensor data
+uint32_t red_Buffer[buffer_length];  //red LED sensor data
+int bufferIndex = 0;
+
 sensors_event_t a, g, temp;
 
 bool sensorReady = false;
@@ -61,6 +67,13 @@ struct MovementData
   float sumAccMagnitude;
   float sumGyroMagnitude;
 
+
+  float acc_peak_threshold = 1.5;
+  float gyro_peak_threshold = 1.5;
+  int num_peaks_acc;
+  int num_peaks_gyro;
+  float max_acc;
+
   int numElements = 0;
   MovementData() {}
 };
@@ -69,8 +82,10 @@ HeartRateData hrData = {};
 MovementData mvData = {};
 Timer twoSecondTimer(2000);
 Timer movementTimer(10);
+Timer SpO2Timer(100);
 
 String payload = "";
+float SpO2 = 0.0;
 
 struct MovementPacket {
   float acc;
@@ -141,7 +156,7 @@ void setup()
 
   // Initialize MAX30105 sensor
   Serial.println("Initializing MAX30105 sensor...");
-  if (particleSensor.begin() == false)
+  if (particleSensor.begin(Wire, I2C_SPEED_STANDARD) == false)
   {
     Serial.println("MAX30105 was not found. Sensor reads will be skipped.");
     sensorReady = false;
@@ -152,6 +167,8 @@ void setup()
     sensorReady = true;
     // optional basic configuration (safe defaults), adjust as needed
     particleSensor.setup();
+    particleSensor.setPulseAmplitudeRed(0x0A);   //Turn Red LED to low to indicate sensor is running
+    particleSensor.setPulseAmplitudeGreen(0); //Turn off Green LED
   }
 
   if (!mpu.begin(0x68, &Wire))
@@ -266,6 +283,42 @@ void createPayload(String &payload, String deviceId, int HR, int BTB, int SpO2, 
   ", \"accZ\": " + accZ + ", \"gyroX\": " + gyroX + ", \"gyroY\": " + gyroY + ", \"gyroZ\": " + gyroZ + "}";
 }
 
+float calculate_SpO2(uint32_t *redBuffer, uint32_t *irBuffer) {
+  float r_mean = 0.0;
+  float ir_mean = 0.0;
+
+  float r_min = 0;
+  float r_max = 0;
+  float ir_min = 0;
+  float ir_max = 0;
+
+  for (int i = 0; i < buffer_length; i++) {
+    r_mean += redBuffer[i];
+    ir_mean += irBuffer[i];
+  }
+  for (int i = 0; i < buffer_length; i++) {
+    r_max = max(r_max, (float)redBuffer[i]);
+    r_min = min(r_min, (float)redBuffer[i]);
+    ir_max = max(ir_max, (float)irBuffer[i]);
+    ir_min = min(ir_min, (float)irBuffer[i]);
+  }
+
+  r_mean /= buffer_length;
+  ir_mean /= buffer_length;
+
+  float r_red = (r_max - r_min) / r_mean;
+  float r_ir = (ir_max - ir_min) / ir_mean;
+
+  float kSpO2_A = 1.5958422;      // constants to approximate SPO2
+  float kSpO2_B = -34.6596622;
+  float kSpO2_C = 112.6898759;
+
+  float ratio = r_red / r_ir;
+  float SpO2 = kSpO2_A * ratio * ratio + kSpO2_B * ratio + kSpO2_C;
+  return SpO2;
+}
+
+
 float getMagnitude(float x, float y, float z)
 {
   return sqrt(x * x + y * y + z * z);
@@ -305,6 +358,16 @@ void loop()
     Serial.println("Beat detected! Average Delta HR: " + String(hrData.averageDeltaHR));
   }
 
+  if (!particleSensor.available()) {
+    particleSensor.check();  //Check the sensor for new data
+  }
+
+  if (SpO2Timer.isExpired() && bufferIndex < buffer_length) {
+    ir_Buffer[bufferIndex] = particleSensor.getIR();
+    red_Buffer[bufferIndex] = particleSensor.getRed();
+    bufferIndex++;
+  }
+
   if (movementTimer.isExpired()) {
     mpu.getEvent(&a, &g, &temp); // check if this works - only if MPU has correct address
 
@@ -314,13 +377,27 @@ void loop()
     mvData.sumGyroX += sqrt(g.gyro.x * g.gyro.x);
     mvData.sumGyroY += sqrt(g.gyro.y * g.gyro.y);
     mvData.sumGyroZ += sqrt(g.gyro.z * g.gyro.z);
+
+    float acc_magnitude = getMagnitude(a.acceleration.x, a.acceleration.y, a.acceleration.z);
+    float gyro_magnitude = getMagnitude(g.gyro.x, g.gyro.y, g.gyro.z);
+    if (acc_magnitude > mvData.acc_peak_threshold) {
+      mvData.num_peaks_acc += 1;
+    }
+    if (gyro_magnitude > mvData.gyro_peak_threshold) {
+      mvData.num_peaks_gyro += 1;
+    }
+    
+    mvData.max_acc = max(mvData.max_acc, acc_magnitude);
+
     movementPackets[mvData.numElements - 1] = {
-      getMagnitude(a.acceleration.x, a.acceleration.y, a.acceleration.z), 
-      getMagnitude(g.gyro.x, g.gyro.y, g.gyro.z)
+      acc_magnitude,
+      gyro_magnitude
     };
 
-    mvData.sumAccMagnitude += getMagnitude(a.acceleration.x, a.acceleration.y, a.acceleration.z);
-    mvData.sumGyroMagnitude += getMagnitude(g.gyro.x, g.gyro.y, g.gyro.z);
+
+
+    mvData.sumAccMagnitude += acc_magnitude;
+    mvData.sumGyroMagnitude += gyro_magnitude;
 
     mvData.numElements += 1; 
     temperature = temp.temperature;     
@@ -343,10 +420,12 @@ void loop()
     float stdDevAcc = stdDev(movementPackets, mvData.numElements - 1, meanAccMagnitude, true);
     float stdDevGyro = stdDev(movementPackets, mvData.numElements - 1, meanGyroMagnitude, false);
 
+    SpO2 = calculate_SpO2(red_Buffer, ir_Buffer);
+
     createPayload(
-      payload, deviceId, hrData.bpm, hrData.btb, 99, temperature, 
-      meanAccMagnitude, stdDevAcc, 5, 5, meanGyroMagnitude, 
-      stdDevGyro, 5, meanAccX, meanAccY, meanAccZ, meanGyroX, meanGyroY, meanGyroZ);
+      payload, deviceId, hrData.bpm, hrData.btb, SpO2, temperature, 
+      meanAccMagnitude, stdDevAcc, mvData.max_acc, mvData.num_peaks_acc, meanGyroMagnitude, 
+      stdDevGyro, mvData.num_peaks_gyro, meanAccX, meanAccY, meanAccZ, meanGyroX, meanGyroY, meanGyroZ);
     sendPOSTRequest(payload);
     mvData = MovementData();
     hrData = HeartRateData();
