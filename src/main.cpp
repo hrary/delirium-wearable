@@ -429,5 +429,7 @@ void loop()
     sendPOSTRequest(payload);
     mvData = MovementData();
     hrData = HeartRateData();
+    bufferIndex = 0;
+    
   }
 }
