@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <time.h>
 #include <Wire.h>
+#include <math.h>
 #include "MAX30105.h"
 #include "heartRate.h"
 #include <Adafruit_MPU6050.h>
@@ -16,7 +17,7 @@ MAX30105 particleSensor;
 Adafruit_MPU6050 mpu;
 
 //Create infared sensor LED data:
-const int buffer_length = 50;
+const int buffer_length = 250;
 uint32_t ir_Buffer[buffer_length]; //infrared LED sensor data
 uint32_t red_Buffer[buffer_length];  //red LED sensor data
 int bufferIndex = 0;
@@ -78,13 +79,23 @@ struct MovementData
   MovementData() {}
 };
 
+struct LastData
+{
+  float lastSpO2 = 0.0;
+  int lastHR = 0;
+  int lastBTB = 0;
+  float lastTemp = 0.0;
+  LastData() {}
+};
+
 HeartRateData hrData = {};
 MovementData mvData = {};
 Timer twoSecondTimer(2000);
 Timer movementTimer(10);
 Timer SpO2Timer(100);
+LastData lastData = {};
 
-String payload = "";
+static char payload_buffer[256];
 float SpO2 = 0.0;
 
 struct MovementPacket {
@@ -131,18 +142,6 @@ void initWifi()
     strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
     Serial.println(String("\nTime synchronized: ") + buf);
   }
-}
-
-// return current UTC timestamp in ISO8601 format like 2025-11-04T20:49:07Z
-String getUTCTimestamp()
-{
-  time_t now = time(nullptr);
-  struct tm timeinfo;
-  // use gmtime_r (reentrant) on ESP32
-  gmtime_r(&now, &timeinfo);
-  char buf[32];
-  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
-  return String(buf);
 }
 
 void setup()
@@ -242,15 +241,16 @@ void setup()
   }
 }
 
-void sendPOSTRequest(const String &payload)
+void sendPOSTRequest(const char *payload, size_t len)
 {
   if (WiFi.status() == WL_CONNECTED)
   {
     HTTPClient http;
     http.begin(apiRoute);
     http.addHeader("Content-Type", "application/json");
-    int httpResponseCode = http.POST(payload);
-    Serial.println("Payload: " + String(payload));
+    Serial.print("Payload: ");
+    Serial.println(payload);
+    int httpResponseCode = http.POST((uint8_t *)payload, len);
     if (httpResponseCode > 0)
     {
       String response = http.getString();
@@ -269,42 +269,47 @@ void sendPOSTRequest(const String &payload)
   }
 }
 
-void createPayload(String &payload, String deviceId, int HR, int BTB, int SpO2, int Temp, float acc_mean, 
-                  float acc_std, float acc_max, int acc_peaks, int gyro_mean, int gyro_std, int gyro_peaks,
-                   float accX, float accY, float accZ, float gyroX, float gyroY, float gyroZ)
+int createPayload(char *buf, size_t bufSize, const char *deviceId, int HR, int BTB, float SpO2, float Temp, float acc_mean,
+                  float acc_std, float acc_max, int acc_peaks, float gyro_mean, float gyro_std, int gyro_peaks,
+                  float accX, float accY, float accZ, float gyroX, float gyroY, float gyroZ)
 {
-  String timestamp = getUTCTimestamp();
-  payload = 
-  "{\"deviceId\": \"" + deviceId + "\", \"timestamp\": \"" + timestamp + "\", \"HR\": " + HR + 
-  ", \"BTB\": " + BTB + ", \"SpO2\": " + SpO2 + ", \"Temp\": " + Temp + ", \"accel_mean_dyn_2s\": " + 
-  acc_mean + ", \"accel_std_dyn_2s\": " + acc_std + ", \"accel_max_2s\": " + acc_max + ", \"accel_peak_count_2s\": " 
-  + acc_peaks + ", \"gyro_mean_2s\": " + gyro_mean + ", \"gyro_std_2s\": " + gyro_std + 
-  ", \"gyro_large_change_count_2s\": " + gyro_peaks + ", \"accX\": " + accX + ", \"accY\": " + accY + 
-  ", \"accZ\": " + accZ + ", \"gyroX\": " + gyroX + ", \"gyroY\": " + gyroY + ", \"gyroZ\": " + gyroZ + "}";
+  time_t now = time(nullptr);
+  struct tm timeinfo;
+  gmtime_r(&now, &timeinfo);
+  char tbuf[32];
+  strftime(tbuf, sizeof(tbuf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+
+  int written = snprintf(buf, bufSize,
+    "{\"deviceId\":\"%s\",\"timestamp\":\"%s\",\"HR\":%d,\"BTB\":%d,\"SpO2\":%.2f,\"Temp\":%.2f,\"accel_mean_dyn_2s\":%.2f,\"accel_std_dyn_2s\":%.2f,\"accel_max_2s\":%.2f,\"accel_peak_count_2s\":%d,\"gyro_mean_2s\":%.2f,\"gyro_std_2s\":%.2f,\"gyro_large_change_count_2s\":%d,\"accX\":%.2f,\"accY\":%.2f,\"accZ\":%.2f,\"gyroX\":%.2f,\"gyroY\":%.2f,\"gyroZ\":%.2f}",
+    deviceId, tbuf, HR, BTB, SpO2, Temp, acc_mean, acc_std, acc_max, acc_peaks, gyro_mean, gyro_std, gyro_peaks, accX, accY, accZ, gyroX, gyroY, gyroZ);
+
+  if (written < 0) return -1; // encoding error
+  if ((size_t)written >= bufSize) return -2; // truncated
+  return written;
 }
 
-float calculate_SpO2(uint32_t *redBuffer, uint32_t *irBuffer) {
-  float r_mean = 0.0;
-  float ir_mean = 0.0;
+float calculate_SpO2(uint32_t *redBuffer, uint32_t *irBuffer, std::size_t length = bufferIndex) {
+  if (length == 0) return NAN;
 
-  float r_min = 0;
-  float r_max = 0;
-  float ir_min = 0;
-  float ir_max = 0;
+  float r_mean = redBuffer[0];
+  float ir_mean = irBuffer[0];
 
-  for (int i = 0; i < buffer_length; i++) {
+  float r_min = redBuffer[0];
+  float r_max = redBuffer[0];
+  float ir_min = irBuffer[0];
+  float ir_max = irBuffer[0];
+
+  for (int i = 1; i < length; i++) {
     r_mean += redBuffer[i];
     ir_mean += irBuffer[i];
-  }
-  for (int i = 0; i < buffer_length; i++) {
     r_max = max(r_max, (float)redBuffer[i]);
     r_min = min(r_min, (float)redBuffer[i]);
     ir_max = max(ir_max, (float)irBuffer[i]);
     ir_min = min(ir_min, (float)irBuffer[i]);
   }
 
-  r_mean /= buffer_length;
-  ir_mean /= buffer_length;
+  r_mean /= length;
+  ir_mean /= length;
 
   float r_red = (r_max - r_min) / r_mean;
   float r_ir = (ir_max - ir_min) / ir_mean;
@@ -358,25 +363,25 @@ void loop()
     Serial.println("Beat detected! Average Delta HR: " + String(hrData.averageDeltaHR));
   }
 
-  if (!particleSensor.available()) {
-    particleSensor.check();  //Check the sensor for new data
-  }
-
-  if (SpO2Timer.isExpired() && bufferIndex < buffer_length) {
-    ir_Buffer[bufferIndex] = particleSensor.getIR();
-    red_Buffer[bufferIndex] = particleSensor.getRed();
-    bufferIndex++;
+  particleSensor.check();
+  if (particleSensor.available()) {
+    if (bufferIndex < buffer_length) {
+      red_Buffer[bufferIndex] = particleSensor.getRed();
+      ir_Buffer[bufferIndex] = particleSensor.getIR();
+      bufferIndex++;
+      particleSensor.nextSample(); 
+    }
   }
 
   if (movementTimer.isExpired()) {
     mpu.getEvent(&a, &g, &temp); // check if this works - only if MPU has correct address
 
-    mvData.sumAccX += sqrt(a.acceleration.x * a.acceleration.x);
-    mvData.sumAccY += sqrt(a.acceleration.y * a.acceleration.y);
-    mvData.sumAccZ += sqrt(a.acceleration.z * a.acceleration.z);
-    mvData.sumGyroX += sqrt(g.gyro.x * g.gyro.x);
-    mvData.sumGyroY += sqrt(g.gyro.y * g.gyro.y);
-    mvData.sumGyroZ += sqrt(g.gyro.z * g.gyro.z);
+    mvData.sumAccX += fabsf(a.acceleration.x);
+    mvData.sumAccY += fabsf(a.acceleration.y);
+    mvData.sumAccZ += fabsf(a.acceleration.z);
+    mvData.sumGyroX += fabsf(g.gyro.x);
+    mvData.sumGyroY += fabsf(g.gyro.y);
+    mvData.sumGyroZ += fabsf(g.gyro.z);
 
     float acc_magnitude = getMagnitude(a.acceleration.x, a.acceleration.y, a.acceleration.z);
     float gyro_magnitude = getMagnitude(g.gyro.x, g.gyro.y, g.gyro.z);
@@ -389,12 +394,10 @@ void loop()
     
     mvData.max_acc = max(mvData.max_acc, acc_magnitude);
 
-    movementPackets[mvData.numElements - 1] = {
+    movementPackets[mvData.numElements] = {
       acc_magnitude,
       gyro_magnitude
     };
-
-
 
     mvData.sumAccMagnitude += acc_magnitude;
     mvData.sumGyroMagnitude += gyro_magnitude;
@@ -403,33 +406,64 @@ void loop()
     temperature = temp.temperature;     
   }
 
-
   if (twoSecondTimer.isExpired())
   {
     // FOR DISPLAY ONLY
-    float meanAccX = mvData.sumAccX / mvData.numElements;
-    float meanAccY = mvData.sumAccY / mvData.numElements;
-    float meanAccZ = mvData.sumAccZ / mvData.numElements;
-    float meanGyroX = mvData.sumGyroX / mvData.numElements;
-    float meanGyroY = mvData.sumGyroY / mvData.numElements;
-    float meanGyroZ = mvData.sumGyroZ / mvData.numElements;
+    float meanAccX, meanAccY, meanAccZ, meanGyroX, meanGyroY, meanGyroZ, meanAccMagnitude, meanGyroMagnitude, stdDevAcc, stdDevGyro;
+    if (mvData.numElements == 0) {
+      mvData.numElements = 1;
+      meanAccX = 0;
+      meanAccY = 0;
+      meanAccZ = 0;
+      meanGyroX = 0;
+      meanGyroY = 0;
+      meanGyroZ = 0;
+      meanAccMagnitude = 0;
+      meanGyroMagnitude = 0;
+      stdDevAcc = 0;
+      stdDevGyro = 0;
+    } else {
+      meanAccX = mvData.sumAccX / mvData.numElements;
+      meanAccY = mvData.sumAccY / mvData.numElements;
+      meanAccZ = mvData.sumAccZ / mvData.numElements;
+      meanGyroX = mvData.sumGyroX / mvData.numElements;
+      meanGyroY = mvData.sumGyroY / mvData.numElements;
+      meanGyroZ = mvData.sumGyroZ / mvData.numElements;
 
-    float meanAccMagnitude = mvData.sumAccMagnitude / mvData.numElements;
-    float meanGyroMagnitude = mvData.sumGyroMagnitude / mvData.numElements;
+      meanAccMagnitude = mvData.sumAccMagnitude / mvData.numElements;
+      meanGyroMagnitude = mvData.sumGyroMagnitude / mvData.numElements;
 
-    float stdDevAcc = stdDev(movementPackets, mvData.numElements - 1, meanAccMagnitude, true);
-    float stdDevGyro = stdDev(movementPackets, mvData.numElements - 1, meanGyroMagnitude, false);
+      stdDevAcc = stdDev(movementPackets, mvData.numElements, meanAccMagnitude, true);
+      stdDevGyro = stdDev(movementPackets, mvData.numElements, meanGyroMagnitude, false);
+    }
 
-    SpO2 = calculate_SpO2(red_Buffer, ir_Buffer);
+    SpO2 = calculate_SpO2(red_Buffer, ir_Buffer, bufferIndex);
 
-    createPayload(
-      payload, deviceId, hrData.bpm, hrData.btb, SpO2, temperature, 
-      meanAccMagnitude, stdDevAcc, mvData.max_acc, mvData.num_peaks_acc, meanGyroMagnitude, 
+    if (hrData.beatCount == 0 || hrData.bpm < 20 || hrData.bpm > 250) {
+      hrData.bpm = lastData.lastHR;
+      hrData.btb = lastData.lastBTB;
+    }
+    if (SpO2 > 100.0 || SpO2 < 75.0 || isnan(SpO2)) {
+      SpO2 = lastData.lastSpO2;
+    }
+
+    int len = createPayload(
+      payload_buffer, sizeof(payload_buffer), deviceId, hrData.bpm, hrData.btb, SpO2, temperature,
+      meanAccMagnitude, stdDevAcc, mvData.max_acc, mvData.num_peaks_acc, meanGyroMagnitude,
       stdDevGyro, mvData.num_peaks_gyro, meanAccX, meanAccY, meanAccZ, meanGyroX, meanGyroY, meanGyroZ);
-    sendPOSTRequest(payload);
+    if (len > 0) {
+      sendPOSTRequest(payload_buffer, (size_t)len);
+    } else if (len == -2) {
+      Serial.println("Payload was truncated; increase buffer size or reduce fields.");
+    } else {
+      Serial.println("Failed to create payload");
+    }
+    lastData.lastSpO2 = SpO2;
+    lastData.lastHR = hrData.bpm;
+    lastData.lastBTB = hrData.btb;
+    lastData.lastTemp = temperature;
     mvData = MovementData();
     hrData = HeartRateData();
     bufferIndex = 0;
-
   }
 }
