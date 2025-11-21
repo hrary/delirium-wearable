@@ -6,23 +6,18 @@
 #include <math.h>
 #include "MAX30105.h"
 #include "heartRate.h"
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
 
 const char *ssid = "HARRYSGADGET 4563";
 const char *password = "12345678";
 const char *apiRoute = "http://192.168.137.1:3000/api/data";
 const char *deviceId = "aaaaaa";
 MAX30105 particleSensor;
-Adafruit_MPU6050 mpu;
-
+const int MPU = 0x68;
 //Create infared sensor LED data:
 const int buffer_length = 250;
 uint32_t ir_Buffer[buffer_length]; //infrared LED sensor data
 uint32_t red_Buffer[buffer_length];  //red LED sensor data
 int bufferIndex = 0;
-
-sensors_event_t a, g, temp;
 
 bool sensorReady = false;
 
@@ -168,77 +163,13 @@ void setup()
     particleSensor.setup();
     particleSensor.setPulseAmplitudeRed(0x0A);   //Turn Red LED to low to indicate sensor is running
     particleSensor.setPulseAmplitudeGreen(0); //Turn off Green LED
+    particleSensor.enableDIETEMPRDY(); //starts temperature measurement
   }
 
-  if (!mpu.begin(0x68, &Wire))
-  {
-    Serial.println("Failed to find MPU6050 chip");
-  }
-  Serial.println("MPU6050 Found!");
-
-  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-
-  Serial.print("Accelerometer range set to: ");
-  switch (mpu.getAccelerometerRange())
-  {
-  case MPU6050_RANGE_2_G:
-    Serial.println("+-2G");
-    break;
-  case MPU6050_RANGE_4_G:
-    Serial.println("+-4G");
-    break;
-  case MPU6050_RANGE_8_G:
-    Serial.println("+-8G");
-    break;
-  case MPU6050_RANGE_16_G:
-    Serial.println("+-16G");
-    break;
-  }
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-  Serial.print("Gyro range set to: ");
-  switch (mpu.getGyroRange())
-  {
-  case MPU6050_RANGE_250_DEG:
-    Serial.println("+- 250 deg/s");
-    break;
-  case MPU6050_RANGE_500_DEG:
-    Serial.println("+- 500 deg/s");
-    break;
-  case MPU6050_RANGE_1000_DEG:
-    Serial.println("+- 1000 deg/s");
-    break;
-  case MPU6050_RANGE_2000_DEG:
-    Serial.println("+- 2000 deg/s");
-    break;
-  }
-
-  // SET BANDWIDTH FOR MPU6050
-  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-  Serial.print("Filter bandwidth set to: ");
-  switch (mpu.getFilterBandwidth())
-  {
-  case MPU6050_BAND_260_HZ:
-    Serial.println("260 Hz");
-    break;
-  case MPU6050_BAND_184_HZ:
-    Serial.println("184 Hz");
-    break;
-  case MPU6050_BAND_94_HZ:
-    Serial.println("94 Hz");
-    break;
-  case MPU6050_BAND_44_HZ:
-    Serial.println("44 Hz");
-    break;
-  case MPU6050_BAND_21_HZ:
-    Serial.println("21 Hz");
-    break;
-  case MPU6050_BAND_10_HZ:
-    Serial.println("10 Hz");
-    break;
-  case MPU6050_BAND_5_HZ:
-    Serial.println("5 Hz");
-    break;
-  }
+  Wire.beginTransmission(MPU);
+  Wire.write(0x6B);  // PWR_MGMT_1 register
+  Wire.write(0);     // set to zero (wakes up the MPU-6050)
+  Wire.endTransmission(true);
 }
 
 void sendPOSTRequest(const char *payload, size_t len)
@@ -374,17 +305,29 @@ void loop()
   }
 
   if (movementTimer.isExpired()) {
-    mpu.getEvent(&a, &g, &temp); // check if this works - only if MPU has correct address
 
-    mvData.sumAccX += fabsf(a.acceleration.x);
-    mvData.sumAccY += fabsf(a.acceleration.y);
-    mvData.sumAccZ += fabsf(a.acceleration.z);
-    mvData.sumGyroX += fabsf(g.gyro.x);
-    mvData.sumGyroY += fabsf(g.gyro.y);
-    mvData.sumGyroZ += fabsf(g.gyro.z);
+    Wire.beginTransmission(MPU);
+    Wire.write(0x3B);  // starting with register 0x3B (ACCEL_XOUT_H)
+    Wire.endTransmission(false);
+    Wire.requestFrom(MPU,14,true); 
 
-    float acc_magnitude = getMagnitude(a.acceleration.x, a.acceleration.y, a.acceleration.z);
-    float gyro_magnitude = getMagnitude(g.gyro.x, g.gyro.y, g.gyro.z);
+    float current_acc_X = (Wire.read()<<8|Wire.read())/16384.0*9.81;
+    float current_acc_Y = (Wire.read()<<8|Wire.read())/16384.0*9.81;
+    float current_acc_Z = (Wire.read()<<8|Wire.read())/16384.0*9.81;
+    float mpu_temp = Wire.read()<<8|Wire.read();
+    float current_gyro_X = (Wire.read()<<8|Wire.read())/131.0;
+    float current_gyro_Y = (Wire.read()<<8|Wire.read())/131.0;
+    float current_gyro_Z = (Wire.read()<<8|Wire.read())/131.0;
+
+    mvData.sumAccX += fabsf(current_acc_X);
+    mvData.sumAccY += fabsf(current_acc_Y);
+    mvData.sumAccZ += fabsf(current_acc_Z);
+    mvData.sumGyroX += fabsf(current_gyro_X);
+    mvData.sumGyroY += fabsf(current_gyro_Y);
+    mvData.sumGyroZ += fabsf(current_gyro_Z);
+
+    float acc_magnitude = getMagnitude(current_acc_X, current_acc_Y, current_acc_Z);
+    float gyro_magnitude = getMagnitude(current_gyro_X, current_gyro_Y, current_gyro_Z);
     if (acc_magnitude > mvData.acc_peak_threshold) {
       mvData.num_peaks_acc += 1;
     }
@@ -403,7 +346,6 @@ void loop()
     mvData.sumGyroMagnitude += gyro_magnitude;
 
     mvData.numElements += 1; 
-    temperature = temp.temperature;     
   }
 
   if (twoSecondTimer.isExpired())
@@ -429,6 +371,8 @@ void loop()
       meanGyroX = mvData.sumGyroX / mvData.numElements;
       meanGyroY = mvData.sumGyroY / mvData.numElements;
       meanGyroZ = mvData.sumGyroZ / mvData.numElements;
+
+      temperature = particleSensor.readTemperature();
 
       meanAccMagnitude = mvData.sumAccMagnitude / mvData.numElements;
       meanGyroMagnitude = mvData.sumGyroMagnitude / mvData.numElements;
