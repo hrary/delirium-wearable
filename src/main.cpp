@@ -53,22 +53,21 @@ struct HeartRateData
 
 struct MovementData
 {
-  float sumAccX;
-  float sumAccY;
-  float sumAccZ;
-  float sumGyroX;
-  float sumGyroY;
-  float sumGyroZ;
+  float sumAccX = 0.0;
+  float sumAccY = 0.0;
+  float sumAccZ = 0.0;
+  float sumGyroX = 0.0;
+  float sumGyroY = 0.0;
+  float sumGyroZ = 0.0;
 
-  float sumAccMagnitude;
-  float sumGyroMagnitude;
-
+  float sumAccMagnitude = 0.0;
+  float sumGyroMagnitude = 0.0;
 
   float acc_peak_threshold = 1.5;
   float gyro_peak_threshold = 1.5;
-  int num_peaks_acc;
-  int num_peaks_gyro;
-  float max_acc;
+  int num_peaks_acc = 0;
+  int num_peaks_gyro = 0;
+  float max_acc = 0.0;
 
   int numElements = 0;
   MovementData() {}
@@ -86,11 +85,11 @@ struct LastData
 HeartRateData hrData = {};
 MovementData mvData = {};
 Timer twoSecondTimer(2000);
-Timer movementTimer(10);
+Timer movementTimer(333);
 Timer SpO2Timer(100);
 LastData lastData = {};
 
-static char payload_buffer[256];
+static char payload_buffer[512];
 float SpO2 = 0.0;
 
 struct MovementPacket {
@@ -143,7 +142,7 @@ void setup()
 {
   Serial.begin(115200);
   Serial.println("Booting...");
-  delay(100);
+  delay(1000);
   initWifi();
 
   Wire.setPins(47, 21); // Use SDA=47, SCL=21
@@ -309,15 +308,44 @@ void loop()
     Wire.beginTransmission(MPU);
     Wire.write(0x3B);  // starting with register 0x3B (ACCEL_XOUT_H)
     Wire.endTransmission(false);
-    Wire.requestFrom(MPU,14,true); 
+    Wire.requestFrom(MPU, 14, true);
 
-    float current_acc_X = (Wire.read()<<8|Wire.read())/16384.0*9.81;
-    float current_acc_Y = (Wire.read()<<8|Wire.read())/16384.0*9.81;
-    float current_acc_Z = (Wire.read()<<8|Wire.read())/16384.0*9.81;
-    float mpu_temp = Wire.read()<<8|Wire.read();
-    float current_gyro_X = (Wire.read()<<8|Wire.read())/131.0;
-    float current_gyro_Y = (Wire.read()<<8|Wire.read())/131.0;
-    float current_gyro_Z = (Wire.read()<<8|Wire.read())/131.0;
+    // Initialize readings with safe defaults
+    float current_acc_X = 0.0f, current_acc_Y = 0.0f, current_acc_Z = 0.0f;
+    float mpu_temp = 0.0f;
+    float current_gyro_X = 0.0f, current_gyro_Y = 0.0f, current_gyro_Z = 0.0f;
+
+    // Ensure we actually received 14 bytes (6 accel, 2 temp, 6 gyro)
+    if (Wire.available() >= 14) {
+      int16_t raw_acc_x = ((Wire.read() << 8) + Wire.read());
+      int16_t raw_acc_y = ((Wire.read() << 8) + Wire.read());
+      int16_t raw_acc_z = ((Wire.read() << 8) + Wire.read());
+      int16_t raw_temp  = ((Wire.read() << 8) + Wire.read());
+      int16_t raw_gyro_x = ((Wire.read() << 8) + Wire.read());
+      int16_t raw_gyro_y = ((Wire.read() << 8) + Wire.read());
+      int16_t raw_gyro_z = ((Wire.read() << 8) + Wire.read());
+
+    Serial.println("raw accel X: " + String(raw_acc_x) + " Y: " + String(raw_acc_y) + " Z: " + String(raw_acc_z));
+
+      // Convert to engineering units
+      // Accel: raw / 16384 LSB per g (assuming default ±2g), convert g -> m/s^2
+      current_acc_X = (raw_acc_x / 16384.0f) * 9.81f;
+      current_acc_Y = (raw_acc_y / 16384.0f) * 9.81f;
+      current_acc_Z = (raw_acc_z / 16384.0f) * 9.81f;
+
+      // Temp: per MPU6050 datasheet: Temp (°C) = (raw / 340) + 36.53
+      mpu_temp = (raw_temp / 340.0f) + 36.53f;
+
+      // Gyro: raw / 131 gives deg/s (assuming default ±250°/s)
+      current_gyro_X = raw_gyro_x / 131.0f;
+      current_gyro_Y = raw_gyro_y / 131.0f;
+      current_gyro_Z = raw_gyro_z / 131.0f;
+
+          Serial.println("Acc X: " + String(current_acc_X) + " Y: " + String(current_acc_Y) + " Z: " + String(current_acc_Z));
+
+   } else {
+      //Serial.println("MPU6050: insufficient I2C data (expected 14 bytes)");
+   }
 
     mvData.sumAccX += fabsf(current_acc_X);
     mvData.sumAccY += fabsf(current_acc_Y);
