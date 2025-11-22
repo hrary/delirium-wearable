@@ -13,7 +13,6 @@ const char *apiRoute = "http://192.168.137.1:3000/api/data";
 const char *deviceId = "aaaaaa";
 MAX30105 particleSensor;
 const int MPU = 0x68;
-const int MPU = 0x68;
 //Create infared sensor LED data:
 const int buffer_length = 250;
 uint32_t ir_Buffer[buffer_length]; //infrared LED sensor data
@@ -86,7 +85,7 @@ struct LastData
 HeartRateData hrData = {};
 MovementData mvData = {};
 Timer twoSecondTimer(2000);
-Timer movementTimer(333);
+Timer movementTimer(10);
 Timer SpO2Timer(100);
 LastData lastData = {};
 
@@ -170,8 +169,7 @@ void setup()
   Wire.write(0x6B);  // PWR_MGMT_1 register
   Wire.write(0);     // set to zero (wakes up the MPU-6050)
   Wire.endTransmission(true);
-    particleSensor.enableDIETEMPRDY(); //starts temperature measurement
-  }
+  particleSensor.enableDIETEMPRDY(); //starts temperature measurement
 
   Wire.beginTransmission(MPU);
   Wire.write(0x6B);  // PWR_MGMT_1 register
@@ -262,9 +260,9 @@ float calculate_SpO2(uint32_t *redBuffer, uint32_t *irBuffer, std::size_t length
 }
 
 
-float getMagnitude(float x, float y, float z)
+float getMagnitude(float x, float y, float z, float bias)
 {
-  return sqrt(x * x + y * y + z * z);
+  return fabsf(sqrt(x * x + y * y + z * z) + bias);
 }
 
 float stdDev(MovementPacket data[], int size, float mean, bool isMovement)
@@ -349,10 +347,10 @@ void loop()
       current_gyro_Y = raw_gyro_y / 131.0f;
       current_gyro_Z = raw_gyro_z / 131.0f;
 
-          Serial.println("Acc X: " + String(current_acc_X) + " Y: " + String(current_acc_Y) + " Z: " + String(current_acc_Z));
+      Serial.println("Acc X: " + String(current_acc_X) + " Y: " + String(current_acc_Y) + " Z: " + String(current_acc_Z));
 
    } else {
-      //Serial.println("MPU6050: insufficient I2C data (expected 14 bytes)");
+      Serial.println("MPU6050: insufficient I2C data (expected 14 bytes)");
    }
 
     mvData.sumAccX += fabsf(current_acc_X);
@@ -361,17 +359,10 @@ void loop()
     mvData.sumGyroX += fabsf(current_gyro_X);
     mvData.sumGyroY += fabsf(current_gyro_Y);
     mvData.sumGyroZ += fabsf(current_gyro_Z);
-    mvData.sumAccX += fabsf(current_acc_X);
-    mvData.sumAccY += fabsf(current_acc_Y);
-    mvData.sumAccZ += fabsf(current_acc_Z);
-    mvData.sumGyroX += fabsf(current_gyro_X);
-    mvData.sumGyroY += fabsf(current_gyro_Y);
-    mvData.sumGyroZ += fabsf(current_gyro_Z);
 
-    float acc_magnitude = getMagnitude(current_acc_X, current_acc_Y, current_acc_Z);
-    float gyro_magnitude = getMagnitude(current_gyro_X, current_gyro_Y, current_gyro_Z);
-    float acc_magnitude = getMagnitude(current_acc_X, current_acc_Y, current_acc_Z);
-    float gyro_magnitude = getMagnitude(current_gyro_X, current_gyro_Y, current_gyro_Z);
+
+    float acc_magnitude = getMagnitude(current_acc_X, current_acc_Y, current_acc_Z, -9.81f);
+    float gyro_magnitude = getMagnitude(current_gyro_X, current_gyro_Y, current_gyro_Z, -5.0f);
     if (acc_magnitude > mvData.acc_peak_threshold) {
       mvData.num_peaks_acc += 1;
     }
@@ -415,8 +406,6 @@ void loop()
       meanGyroX = mvData.sumGyroX / mvData.numElements;
       meanGyroY = mvData.sumGyroY / mvData.numElements;
       meanGyroZ = mvData.sumGyroZ / mvData.numElements;
-
-      temperature = particleSensor.readTemperature();
 
       temperature = particleSensor.readTemperature();
 
