@@ -13,6 +13,7 @@ const char *apiRoute = "http://192.168.137.1:3000/api/data";
 const char *deviceId = "aaaaaa";
 MAX30105 particleSensor;
 const int MPU = 0x68;
+const int MPU = 0x68;
 //Create infared sensor LED data:
 const int buffer_length = 250;
 uint32_t ir_Buffer[buffer_length]; //infrared LED sensor data
@@ -162,6 +163,13 @@ void setup()
     particleSensor.setup();
     particleSensor.setPulseAmplitudeRed(0x0A);   //Turn Red LED to low to indicate sensor is running
     particleSensor.setPulseAmplitudeGreen(0); //Turn off Green LED
+    particleSensor.enableDIETEMPRDY(); //starts temperature measurement
+  }
+
+  Wire.beginTransmission(MPU);
+  Wire.write(0x6B);  // PWR_MGMT_1 register
+  Wire.write(0);     // set to zero (wakes up the MPU-6050)
+  Wire.endTransmission(true);
     particleSensor.enableDIETEMPRDY(); //starts temperature measurement
   }
 
@@ -353,7 +361,15 @@ void loop()
     mvData.sumGyroX += fabsf(current_gyro_X);
     mvData.sumGyroY += fabsf(current_gyro_Y);
     mvData.sumGyroZ += fabsf(current_gyro_Z);
+    mvData.sumAccX += fabsf(current_acc_X);
+    mvData.sumAccY += fabsf(current_acc_Y);
+    mvData.sumAccZ += fabsf(current_acc_Z);
+    mvData.sumGyroX += fabsf(current_gyro_X);
+    mvData.sumGyroY += fabsf(current_gyro_Y);
+    mvData.sumGyroZ += fabsf(current_gyro_Z);
 
+    float acc_magnitude = getMagnitude(current_acc_X, current_acc_Y, current_acc_Z);
+    float gyro_magnitude = getMagnitude(current_gyro_X, current_gyro_Y, current_gyro_Z);
     float acc_magnitude = getMagnitude(current_acc_X, current_acc_Y, current_acc_Z);
     float gyro_magnitude = getMagnitude(current_gyro_X, current_gyro_Y, current_gyro_Z);
     if (acc_magnitude > mvData.acc_peak_threshold) {
@@ -399,6 +415,8 @@ void loop()
       meanGyroX = mvData.sumGyroX / mvData.numElements;
       meanGyroY = mvData.sumGyroY / mvData.numElements;
       meanGyroZ = mvData.sumGyroZ / mvData.numElements;
+
+      temperature = particleSensor.readTemperature();
 
       temperature = particleSensor.readTemperature();
 
